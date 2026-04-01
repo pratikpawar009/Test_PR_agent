@@ -14,6 +14,7 @@ class Finding:
     severity: str
     confidence: float
     file: str
+    line: int | None
     hunk: str
     message: str
     suggestion: str
@@ -40,6 +41,7 @@ Return JSON only using this exact schema:
       "type": "bug|security|performance|maintainability|testing",
       "severity": "low|medium|high|critical",
       "confidence": 0.0,
+      "line": 0,
       "hunk": "short location context",
       "message": "what is wrong and why it matters",
       "suggestion": "specific fix recommendation"
@@ -51,6 +53,7 @@ Constraints:
 - Focus on concrete issues from this diff only.
 - Avoid style-only comments.
 - Keep findings concise.
+- `line` must be the changed RIGHT-side line number when available, otherwise null.
 - If no actionable issue, return: {{"findings":[]}}
 """
     raw = ask_llm(prompt)
@@ -60,10 +63,11 @@ Constraints:
         finding_type = str(item.get("type", "maintainability")).strip().lower()
         severity = str(item.get("severity", "low")).strip().lower()
         confidence = _clamp_confidence(item.get("confidence", 0))
+        line = _parse_line_number(item.get("line"))
         hunk = str(item.get("hunk", "")).strip()
         message = str(item.get("message", "")).strip()
         suggestion = str(item.get("suggestion", "")).strip()
-        fingerprint = _fingerprint(file_name, hunk, message, suggestion)
+        fingerprint = _fingerprint(file_name, line, hunk, message, suggestion)
 
         if not message:
             continue
@@ -74,6 +78,7 @@ Constraints:
                 severity=severity,
                 confidence=confidence,
                 file=file_name,
+                line=line,
                 hunk=hunk,
                 message=message,
                 suggestion=suggestion,
@@ -133,6 +138,14 @@ def _clamp_confidence(value: Any) -> float:
     return max(0.0, min(1.0, num))
 
 
-def _fingerprint(file_name: str, hunk: str, message: str, suggestion: str) -> str:
-    data = f"{file_name}|{hunk}|{message}|{suggestion}"
+def _parse_line_number(value: Any) -> int | None:
+    try:
+        num = int(value)
+    except (ValueError, TypeError):
+        return None
+    return num if num > 0 else None
+
+
+def _fingerprint(file_name: str, line: int | None, hunk: str, message: str, suggestion: str) -> str:
+    data = f"{file_name}|{line or ''}|{hunk}|{message}|{suggestion}"
     return sha256(data.encode("utf-8")).hexdigest()
