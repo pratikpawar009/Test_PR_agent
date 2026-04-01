@@ -1,0 +1,151 @@
+name: AI PR Reviewer
+
+on:
+  workflow_call:
+    secrets:
+      OPENAI_API_KEY:
+        required: false
+      AZURE_OPENAI_API_KEY:
+        required: false
+      AZURE_OPENAI_ENDPOINT:
+        required: false
+      AZURE_API_VERSION:
+        required: false
+      AZURE_DEPLOYMENT_NAME:
+        required: false
+    inputs:
+      min_confidence:
+        description: "Minimum confidence threshold (0-1)"
+        required: false
+        type: string
+        default: "0.65"
+      min_severity:
+        description: "Minimum severity to publish (low|medium|high|critical)"
+        required: false
+        type: string
+        default: "medium"
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PR HEAD
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build diff against base branch
+        run: |
+          git fetch origin "${{ github.base_ref }}"
+          BASE_SHA=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
+          git diff --no-color "$BASE_SHA"...HEAD > diff.txt
+          git diff --name-only "$BASE_SHA"...HEAD | rg '\.py$' > changed_python_files.txt || true
+
+      - name: Run pycodestyle on changed Python files
+        run: |
+          if [ ! -s changed_python_files.txt ]; then
+            : > pep8.txt
+            exit 0
+          fi
+
+          FILES=$(tr '\n' ' ' < changed_python_files.txt)
+          pycodestyle $FILES > pep8.txt || true
+
+      - name: Detect if AI can run
+        id: gate
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT || vars.AZURE_OPENAI_ENDPOINT }}
+          AZURE_API_VERSION: ${{ secrets.AZURE_API_VERSION || vars.AZURE_API_VERSION }}
+          AZURE_DEPLOYMENT_NAME: ${{ secrets.AZURE_DEPLOYMENT_NAME || vars.AZURE_DEPLOYMENT_NAME }}
+        run: |
+          if [ -n "$OPENAI_API_KEY" ]; then
+            echo "can_run=true" >> "$GITHUB_OUTPUT"
+          elif [ -n "$AZURE_OPENAI_API_KEY" ] && [ -n "$AZURE_OPENAI_ENDPOINT" ] && [ -n "$AZURE_API_VERSION" ] && [ -n "$AZURE_DEPLOYMENT_NAME" ]; then
+            echo "can_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "can_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run AI reviewer
+        if: steps.gate.outputs.can_run == 'true'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT || vars.AZURE_OPENAI_ENDPOINT }}
+          AZURE_API_VERSION: ${{ secrets.AZURE_API_VERSION || vars.AZURE_API_VERSION }}
+          AZURE_DEPLOYMENT_NAME: ${{ secrets.AZURE_DEPLOYMENT_NAME || vars.AZURE_DEPLOYMENT_NAME }}
+        run: |
+          python reviewer/main.py \
+            --diff-file diff.txt \
+            --pep8-file pep8.txt \
+            --rules-file reviewer/rules.txt \
+            --out-json review.json \
+            --out-md review.md \
+            --min-confidence "${{ inputs.min_confidence }}" \
+            --min-severity "${{ inputs.min_severity }}"
+
+      - name: Run lint-only reviewer when AI is skipped
+        if: steps.gate.outputs.can_run != 'true'
+        run: |
+          python reviewer/main.py \
+            --skip-ai \
+            --diff-file diff.txt \
+            --pep8-file pep8.txt \
+            --rules-file reviewer/rules.txt \
+            --out-json review.json \
+            --out-md review.md \
+            --min-confidence "${{ inputs.min_confidence }}" \
+            --min-severity low
+
+      - name: Upsert PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- ai-pr-reviewer -->';
+            const body = fs.readFileSync('review.md', 'utf8');
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number, per_page: 100 }
+            );
+
+            const existing = comments.find(c =>
+              c.user?.type === 'Bot' && c.body?.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body
+              });
+            }
