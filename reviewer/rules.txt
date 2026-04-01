@@ -1,0 +1,6 @@
+- Prioritize concrete bugs, security flaws, performance regressions, and missing tests.
+- Do not report pure style or formatting issues.
+- Flag hardcoded secrets, unsafe auth/authorization changes, and injection risks.
+- Highlight risky error-handling changes that can mask failures.
+- Call out breaking API contract changes that lack migration handling.
+- Prefer concise, actionable suggestions with clear impact.
