@@ -54,10 +54,15 @@ def main() -> None:
         ),
         reverse=True,
     )
+    reviewed_files = sorted({df.path for df in diff_files})
+    file_statuses = build_file_statuses(reviewed_files, filtered)
+    overall_status = derive_overall_status(file_statuses)
 
     result = {
         "summary": final_summary(filtered),
+        "overall_status": overall_status,
         "total_findings": len(filtered),
+        "file_statuses": file_statuses,
         "findings": [
             {
                 "type": f.finding_type,
@@ -79,20 +84,56 @@ def main() -> None:
 
 
 def render_markdown(result: dict) -> str:
+    overall_status = result.get("overall_status", "unknown")
+    file_statuses = result.get("file_statuses", [])
     lines = [
         "<!-- ai-pr-reviewer -->",
         "## AI PR Review",
         "",
+        f"- Overall status: **{overall_status}**",
         f"- {result.get('summary', '')}",
         f"- Total findings: {result.get('total_findings', 0)}",
         "",
     ]
+
+    if file_statuses:
+        lines.extend(
+            [
+                "### File Status",
+                "",
+                "| File | Status | Findings | Highest Severity |",
+                "| --- | --- | ---: | --- |",
+            ]
+        )
+        for item in file_statuses:
+            lines.append(
+                f"| `{item['file']}` | {item['status']} | {item['findings_count']} | {item['highest_severity']} |"
+            )
+        lines.append("")
 
     findings = result.get("findings", [])
     if not findings:
         lines.append("No actionable findings above current thresholds.")
         return "\n".join(lines).strip() + "\n"
 
+    lines.extend(
+        [
+            "### Findings Table",
+            "",
+            "| File | Type | Severity | Confidence | Line | Issue |",
+            "| --- | --- | --- | ---: | ---: | --- |",
+        ]
+    )
+    for finding in findings:
+        issue = (finding["message"] or "").replace("\n", " ").replace("|", "\\|")
+        lines.append(
+            f"| `{finding['file']}` | {finding['type']} | {finding['severity']} | "
+            f"{finding['confidence']} | {finding.get('line') or ''} | {issue} |"
+        )
+    lines.append("")
+
+    lines.append("### Detailed Findings")
+    lines.append("")
     for finding in findings:
         lines.extend(
             [
@@ -108,6 +149,57 @@ def render_markdown(result: dict) -> str:
             ]
         )
     return "\n".join(lines).strip() + "\n"
+
+
+def build_file_statuses(reviewed_files: list[str], findings: list[Finding]) -> list[dict]:
+    by_file: dict[str, list[Finding]] = {path: [] for path in reviewed_files}
+    for finding in findings:
+        by_file.setdefault(finding.file, []).append(finding)
+
+    statuses = []
+    for path in sorted(by_file.keys()):
+        file_findings = by_file[path]
+        if not file_findings:
+            statuses.append(
+                {
+                    "file": path,
+                    "status": "good",
+                    "findings_count": 0,
+                    "highest_severity": "none",
+                }
+            )
+            continue
+
+        highest = max(file_findings, key=lambda item: SEVERITY_RANK.get(item.severity, 0)).severity
+        status = severity_to_status(highest)
+        statuses.append(
+            {
+                "file": path,
+                "status": status,
+                "findings_count": len(file_findings),
+                "highest_severity": highest,
+            }
+        )
+    return statuses
+
+
+def severity_to_status(severity: str) -> str:
+    rank = SEVERITY_RANK.get(severity, 0)
+    if rank >= SEVERITY_RANK["high"]:
+        return "blocking"
+    if rank >= SEVERITY_RANK["medium"]:
+        return "needs_attention"
+    return "minor"
+
+
+def derive_overall_status(file_statuses: list[dict]) -> str:
+    if any(item.get("status") == "blocking" for item in file_statuses):
+        return "blocking"
+    if any(item.get("status") == "needs_attention" for item in file_statuses):
+        return "needs_attention"
+    if any(item.get("status") == "minor" for item in file_statuses):
+        return "minor"
+    return "good"
 
 
 def load_pep8_findings(path: str) -> list[Finding]:

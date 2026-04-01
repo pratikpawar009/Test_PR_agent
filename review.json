@@ -1,5 +1,7 @@
 {
   "summary": "No high-confidence issues found. Human review is still recommended.",
+  "overall_status": "good",
   "total_findings": 0,
+  "file_statuses": [],
   "findings": []
 }
